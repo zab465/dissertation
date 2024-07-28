@@ -1,0 +1,347 @@
+---
+title: "Sensitivity 4 - Interaction"
+output: html_document
+date: "2024-07-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glmnet)
+library(caret)
+library(purrr)
+library(vcd)
+library(DescTools)
+library(knitr)
+library(kableExtra)
+library(stargazer)
+library(ggplot2)
+library(gridExtra)
+library(sandwich)
+library(lmtest)
+library(pscl)
+```
+
+```{r loading data}
+data <- read.csv("imputed_cleaned_data.csv")
+data <- data %>% 
+	mutate(group = factor(group))
+```
+
+```{r}
+data <- data %>%
+  mutate(fdextort = factor(fdextort, levels = c(0, 1))) %>% 
+	mutate(fdsmuggl = factor(fdsmuggl, levels = c(0, 1))) %>% 
+	mutate(fdrob = factor(fdrob, levels = c(0, 1))) %>% 
+	mutate(mul_bases = factor(mul_bases, levels = c(0, 1))) %>% 
+	mutate(crim_degr_py = as.numeric(crim_degr_py)) %>% 
+	mutate(endstr = factor(endstr, levels = c(0, 1, 2, 3, 4, 5))) %>% 
+	mutate(end = factor(end, levels = c(0, 1))) %>% 
+	mutate(ethn = factor(ethn, levels = c(0, 1))) %>% 
+	mutate(EAP = factor(EAP, levels = c(0, 1))) %>% 
+	mutate(ECA = factor(ECA, levels = c(0, 1))) %>% 
+	mutate(LAC = factor(LAC, levels = c(0, 1))) %>% 
+	mutate(MENA = factor(MENA, levels = c(0, 1))) %>% 
+	mutate(North_America = factor(North_America, levels = c(0, 1))) %>% 
+	mutate(SAS = factor(SAS, levels = c(0, 1))) %>% 
+	mutate(SSA = factor(SSA, levels = c(0, 1))) %>% 
+	mutate(nat = factor(nat, levels = c(0, 1))) %>% 
+	mutate(right = factor(right, levels = c(0, 1))) %>% 
+	mutate(ercsr = factor(ercsr, levels = c(0, 1))) %>% 
+	mutate(pch = factor(pch, levels = c(0, 1))) %>% 
+	mutate(sq = factor(sq, levels = c(0, 1))) %>% 
+	mutate(tch = factor(tch, levels = c(0, 1))) %>% 
+	mutate(public_service = factor(public_service, levels = c(0, 1))) %>% 
+	mutate(fate_leader = factor(fate_leader, levels = c(0, 1, 2))) %>% 
+	mutate(soc_service = factor(soc_service, levels = c(0, 1))) %>% 
+	mutate(combined_size = factor(combined_size, levels = c("1", "2", "3", "4", "5"))) %>% 
+  mutate(combined_reli = factor(combined_reli, levels = c(0, 1))) %>% 
+  mutate(combined_left = factor(combined_left, levels = c(0, 1))) %>% 
+  mutate(combined_hierarch = factor(combined_hierarch, levels = c(0, 1))) %>% 
+  mutate(combined_drug_trafficking = factor(combined_drug_trafficking, levels = c(0, 1))) %>%
+  mutate(combined_kidnap = factor(combined_kidnap, levels = c(0, 1))) %>%
+  mutate(combined_state_sponsor = factor(combined_state_sponsor, levels = c(0, 1))) %>%
+  mutate(combined_terrctrl = factor(combined_terrctrl, levels = c(0, 1)))
+```
+```{r logging the continuous variables}
+small_constant <- 0.00001
+data <- data %>% 
+	mutate(crim_degr_py = sqrt(crim_degr_py + small_constant)) %>% 
+	mutate(combined_size = ifelse(combined_size == 1, 10, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 2, 100, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 3, 1000, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 4, 5000, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 1, 10000, combined_size)) %>%
+	mutate(combined_size = as.numeric(combined_size)) %>%
+	mutate(combined_size = sqrt(combined_size + small_constant)) %>% 
+	mutate(combined_duration = sqrt(combined_duration + small_constant))
+```
+
+
+### Creating new variables for ideologies
+
+```{r}
+data <- data %>% 
+	mutate(pure_religious = ifelse(combined_reli == 1 & (nat == 0 & ethn == 0 & combined_left == 0 & ercsr == 0 & right == 0), 1, 0)) %>% 
+	mutate(pure_secular = ifelse((ethn == 1 & combined_reli == 0) |(combined_left == 1 & combined_reli == 0) |(ercsr == 1 & combined_reli ==0) |(right == 1 & combined_reli == 0), 1, 0)) %>% 
+	mutate(secular_hybrid = ifelse(((ethn == 1 & combined_reli == 0) &(combined_left == 1 | ercsr == 1 | right == 1)) | 
+														((combined_left == 1 & combined_reli == 0) &(ethn == 1 | ercsr == 1 | right == 1)) |
+														((ercsr == 1 & combined_reli ==0) & (ethn == 1 |  combined_left == 1 | right == 1)) |
+														((right == 1 & combined_reli == 0) & (ethn == 1 |  ercsr == 1 | combined_left == 1)), 1, 0)) %>% 
+	mutate(hybrid_religious = ifelse(combined_reli == 1 & (ethn == 1 | combined_left == 1 | ercsr == 1 | right == 1), 1, 0))
+```
+
+
+```{r making individual datasets based on outcome variables}
+extortion_data <- data %>% 
+	select(-c(fdrob, fdsmuggl, combined_drug_trafficking, combined_kidnap)) 
+robbery_data <- data %>% 
+	select(-c(fdextort,fdsmuggl, combined_drug_trafficking, combined_kidnap))
+smuggling_data <- data %>% 
+	select(-c(fdextort, fdrob, combined_drug_trafficking, combined_kidnap))
+drug_data <- data %>% 
+	select(-c(fdextort, fdrob, fdsmuggl, combined_kidnap))
+kidnap_data <- data %>% 
+	select(-c(fdextort, fdrob, fdsmuggl, combined_drug_trafficking))
+```
+
+```{r cluster error function}
+cluster_se <- function(model, cluster) {
+  # Get model matrix
+  X <- model.matrix(model)
+  # Get number of clusters
+  cluster <- as.factor(cluster)
+  M <- length(unique(cluster))
+  N <- length(cluster)
+  K <- model$rank
+  # Calculate degrees of freedom adjustment
+  dfc <- (M / (M - 1)) * ((N - 1) / (N - K))
+  # Calculate the "meat" of the sandwich
+  uj <- apply(estfun(model), 2, function(x) tapply(x, cluster, sum))
+  meat <- crossprod(uj) / N
+  # Calculate clustered standard errors
+  se <- sqrt(diag(dfc * sandwich(model, meat = meat)))
+  return(se)
+}
+```
+
+
+## Final model
+
+```{r drug non cross-validated glmnet}
+set.seed(43)
+drug_lm1 <- glm(combined_drug_trafficking ~ combined_duration + combined_state_sponsor + crim_degr_py +combined_size  + pure_religious + pure_secular ,
+								data = drug_data, 
+								family = binomial(link = "cloglog")
+								)
+
+clustered_drug <- cluster_se(drug_lm1, drug_data$Year)
+```
+
+
+
+```{r extortion non cross-validated glmnet}
+# Set seed for reproducibility
+set.seed(43)
+
+extortion_lm1 <- glm(fdextort ~ combined_duration + combined_state_sponsor + crim_degr_py +combined_size  + pure_religious + pure_secular ,
+								data = extortion_data, 
+								family = binomial(link = "cloglog")
+								)
+
+clustered_extortion <- cluster_se(extortion_lm1, extortion_data$Year)
+```
+
+
+```{r smuggling non cross-validated glmnet}
+# Set seed for reproducibility
+set.seed(43)
+
+smug_lm1 <- glm(fdsmuggl ~ combined_duration + combined_state_sponsor + crim_degr_py +combined_size  + pure_religious + pure_secular ,
+								data = smuggling_data, 
+								family = binomial(link = "cloglog")
+								)
+
+clustered_smug <- cluster_se(smug_lm1, smuggling_data$Year)
+```
+
+
+```{r robbery non-cross-validated glmnet}
+# Set seed for reproducibility
+set.seed(43)
+
+rob_lm1 <- glm(fdrob ~ combined_duration + combined_state_sponsor + crim_degr_py +combined_size  + pure_religious + pure_secular ,
+								data = robbery_data, 
+								family = binomial(link = "cloglog")
+								)
+
+clustered_rob <- cluster_se(rob_lm1, robbery_data$Year)
+```
+
+
+```{r kidnap non-cross-validated glmnet}
+# Set seed for reproducibility
+set.seed(43)
+
+kidnap_lm1 <- glm(combined_kidnap ~ combined_duration + combined_state_sponsor + crim_degr_py +combined_size  + pure_religious + pure_secular ,
+								data = kidnap_data, 
+								family = binomial(link = "cloglog")
+								)
+
+clustered_kidnap <- cluster_se(kidnap_lm1, kidnap_data$Year)
+```
+
+```{r new mcfaddens}
+##ROBBERY
+# Calculate pseudo R-squared values
+mcfadden_robbery <- blr_rsq_mcfadden_adj(rob_lm1)
+adjusted_mcfadden_robbery <- blr_rsq_mcfadden(rob_lm1)
+
+
+##KIDNAP
+
+mcfadden_kidnap <- blr_rsq_mcfadden_adj(kidnap_lm1)
+adjusted_mcfadden_kidnap <- blr_rsq_mcfadden(kidnap_lm1)
+
+
+##EXTORTION 
+mcfadden_extortion <- blr_rsq_mcfadden_adj(extortion_lm1)
+adjusted_mcfadden_extortion <- blr_rsq_mcfadden(extortion_lm1)
+
+##SMUGGLING
+mcfadden_smuggling <- blr_rsq_mcfadden_adj(smug_lm1)
+adjusted_mcfadden_smug <- blr_rsq_mcfadden(smug_lm1)
+
+
+## DRUGS
+mcfadden_drugs <- blr_rsq_mcfadden_adj(drug_lm1)
+adjusted_mcfadden_drugs <- blr_rsq_mcfadden(drug_lm1)
+```
+
+
+```{r}
+stargazer(extortion_lm1,rob_lm1, smug_lm1, kidnap_lm1,drug_lm1,
+					type = "text", 
+					se = list(clustered_extortion, clustered_rob, clustered_smug, clustered_kidnap, clustered_drug), 
+					title = "Table 7: Cloglog Regressions of Terrorist Crimes on Organization Level Factors", 
+					dep.var.labels = c("Extortion", "Robbery", "Smuggling", "Kidnapping", "Drug Trade"), 
+					dep.var.caption = "Type of Funding Crime",
+					omit.stat = c("rsq", "adj.rsq", "LL", "F"), out = "sensitivity.5.1.html",
+					covariate.labels = c("Org. Age", "State Spons.", "Int. Crime Org.", "Org. Size", 
+					 										"Pure Religious", "Pure Secular"), 
+					add.lines = list(c("AIC", round(AIC(extortion_lm1), 2), round(AIC(rob_lm1), 2), round(AIC(smug_lm1), 2), 
+                             round(AIC(kidnap_lm1), 2), round(AIC(drug_lm1), 2)), 
+													 c("McFadden's R-Square", round(mcfadden_extortion, 4), round(mcfadden_robbery, 4), 
+													 	round(mcfadden_smuggling, 4), round(mcfadden_kidnap, 4), round(mcfadden_drugs, 4)),
+              c("Adjusted McFadden's", round(adjusted_mcfadden_extortion, 4), round(adjusted_mcfadden_robbery, 4), round(adjusted_mcfadden_smug, 4),
+            	round(adjusted_mcfadden_kidnap, 4), round(adjusted_mcfadden_drugs, 4))
+              )
+)
+```
+
+```{r VIF VALUES for non-cross-validated glmnet}
+vif_ex <- vif(extortion_lm1)
+vif_rob <- vif(rob_lm1)
+vif_smugg <- vif(smug_lm1)
+vif_kidnap <- vif(kidnap_lm1)
+vif_drugs <- vif(drug_lm1)
+
+vif_table <- cbind(vif_ex, vif_rob, vif_smugg, vif_kidnap, vif_drugs)
+
+vif_names <- c(
+							 combined_duration = "Org. Age",
+										combined_state_sponsor = "State Spons.",
+										crim_degr_py = "Crime Interactions", 
+										combined_size = "Org. Size", 
+										
+										pure_religious = "Religious", 
+										pure_secular = "Pure Secular" 
+						)
+
+
+vif_cols <- c(vif_ex = "Extortion VIF", vif_rob = "Robbery VIF", vif_smugg = "Smuggling VIF", vif_kidnap = "Kidnapping VIF", vif_drugs = "Drug Trade VIF")
+
+rownames(vif_table) <- vif_names
+colnames(vif_table) <- vif_cols
+
+vif_table <- knitr::kable(vif_table, caption = "Table 8: VIF Scores of Regressions of Terrorist Funding Crimes on Organization Level Factors") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = T, position = "center")
+
+# save
+save_kable(vif_table, "sensitivity.5.2.html")
+```
+
+
+```{r residuals }
+# Calculate deviance residuals for each model
+residuals_extortion <- residuals(extortion_lm1, type = "deviance")
+residuals_robbery <- residuals(rob_lm1, type = "deviance")
+residuals_smuggling <- residuals(smug_lm1, type = "deviance")
+residuals_kidnap <- residuals(kidnap_lm1, type = "deviance")
+residuals_drugs <- residuals(drug_lm1, type = "deviance")
+
+
+
+# Create data frames for plotting
+extortion_df <- data.frame(Fitted = fitted(extortion_lm1), Residuals = residuals_extortion)
+robbery_df <- data.frame(Fitted = fitted(rob_lm1), Residuals = residuals_robbery)
+smuggling_df <- data.frame(Fitted = fitted(smug_lm1), Residuals = residuals_smuggling)
+kidnap_df <- data.frame(Fitted = fitted(kidnap_lm1), Residuals = residuals_kidnap)
+drugs_df <- data.frame(Fitted = fitted(drug_lm1), Residuals = residuals_drugs)
+
+
+# Plot for Extortion model
+plot1 <- ggplot(extortion_df, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  #geom_smooth(method = "loess") +
+  ggtitle("Residuals vs Fitted for Extortion Model")
+
+# Plot for Robbery model
+plot2 <- ggplot(robbery_df, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  #geom_smooth(method = "loess") +
+  ggtitle("Residuals vs Fitted for Robbery Model")
+
+# Plot for Smuggling model
+plot3 <- ggplot(smuggling_df, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  #geom_smooth(method = "loess") +
+  ggtitle("Residuals vs Fitted for Smuggling Model")
+
+# Plot for Kidnap model
+plot4 <- ggplot(kidnap_df, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  #geom_smooth(method = "loess") +
+  ggtitle("Residuals vs Fitted for Kidnap Model")
+
+# Plot for Drugs model
+plot5 <- ggplot(drugs_df, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  #geom_smooth(method = "loess") +
+  ggtitle("Residuals vs Fitted for Drugs Model")
+grid <- grid.arrange(plot1, plot2, plot3, plot4, plot5, nrow = 3, ncol = 2, 
+										 top = textGrob("Figure 5: Purist Ideology Cloglog Regressions - Residuals vs. Fitted Plots", 
+                                   gp = gpar(fontsize = 20, fontface = "bold")))
+ggsave("sensitivity.5.3.pdf", grid, width = 10, height = 10)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

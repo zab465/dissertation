@@ -1,0 +1,255 @@
+---
+title: "Diss data"
+output: html_document
+date: "2024-03-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading the main libraries for the task: 
+```{r}
+library(readxl)
+library(tidyverse)
+library(haven)
+library(DBI)
+```
+
+
+Importing the ITERATE (International Terrorism: Attributes of Terrorist Events) dataset for 1968 to 2014 and appending the later years up until 2017
+**Note: this dataset was provided to me by the LSE in part fulfillment of my MSc thesis (it is thus not available in the repository). The path here is relative to my own directory but all pieces of code relative to the ITERATE dataset will not be replicable unless the user is independently provided with the data.** 
+```{r}
+data1968 <- read_excel("/dissertation/ITERATE DATA/ITERATE COMMON FILE (Y) 1968-2014 (1).xlsx")
+data2015 <- read_excel("/dissertation/ITERATE DATA/ITERATE COMMON FILE (Y) 2015.xls")
+data2016 <- read_excel("/dissertation/ITERATE DATA/ITERATE COMMON FILE (Y) 2016.xls")
+data2017 <- read_excel("/dissertation/ITERATE DATA/ITERATE COMMON FILE (Y) 2017.xls")
+```
+```{r}
+# FINAL ITERATE COMBINED DATA
+# 1968-2017
+combined_data <- bind_rows(data1968, data2015, data2016, data2017)
+```
+
+## Cleaning ITERATE 
+Here, I clean the data to include the organization names which are in a separate file. 
+```{r}
+orgs <- read_excel("/dissertation/Organizations ITERATE.xlsx",skip = 1)
+# make it into a dataframe for easier handling
+as.data.frame(orgs)
+# rename the header 
+colnames(orgs) <- c("col")
+# overwrite orgs to be separated into columns
+orgs <-separate_wider_delim(orgs, col, delim = " ", names = c("1st grp inititating action", "group"), too_many = "merge")
+
+#remove leading 0's in orgs so that it will match in combined_data
+orgs$`1st grp inititating action` <- gsub("^0+", "", orgs$`1st grp inititating action`)
+
+combined_data$`1st grp inititating action` <- as.character(combined_data$`1st grp inititating action`)
+
+# merge the dataset with combined data
+combined_data_names <- left_join(combined_data, orgs, by = "1st grp inititating action")
+```
+
+# Cleaning group names
+```{r}
+# Remove content within parentheses and after dash
+combined_data_names$group <- gsub("\\s*\\([^\\)]+\\)", "", combined_data_names$group)
+combined_data_names$group <- gsub("([A-Z]), ([^A-Z\\s]*$)", "", combined_data_names$group) 
+
+
+# Remove leading and trailing spaces
+combined_data_names$group <- trimws(combined_data_names$group)
+```
+
+
+# Loading the BAAD dataset 1998-2004
+```{r}
+# this one can be left as is 
+# 1998-2004
+baad <- read_dta("/dissertation/BAAD2.dta")
+
+baad <- baad %>%
+	rename("Year" = "year") %>%
+	rename("group" = "org")
+
+# do the same regex for the baad
+baad$group <- gsub("\\s*\\([^\\)]+\\)", "", baad$group)
+# add a regex for things after a comma
+baad$group <- gsub(",[^,]*", "", baad$group)
+```
+
+# cleaning the orgs data
+```{r}
+# use regex to clean differences in nomenclature
+orgs$group <- gsub("\\s*\\([^\\)]+\\)", "", orgs$group)
+orgs$group <- gsub("\\s*[–‑-]\\s*[^\\s]+", "", orgs$group) 
+orgs$group <- gsub("([A-Z]), ([^A-Z\\s]*$)", "", orgs$group) 
+orgs$group <- trimws(orgs$group)
+```
+
+```{r}
+# Iterate through each organization name in baad
+for (i in 1:nrow(baad)) {
+  # Get the organization name
+  org_name <- baad$group[i]
+  baad$org_code <- baad$org_code
+  # Initialize code as NA
+  code <- NA
+  
+  # Iterate through each organization name in orgs
+  for (j in 1:nrow(orgs)) {
+    # Get the organization name and code
+    org_name_pattern <- orgs$group[j]
+    org_code <- orgs$`1st grp inititating action`[j]
+    
+    # Check if org_name matches org_name_pattern using regular expressions
+    if (grepl(org_name_pattern, org_name, ignore.case = TRUE)) {
+      # If a match is found, assign the corresponding code
+      code <- org_code
+      break  # Exit the loop if a match is found
+    }
+  }
+  
+  # Add the code to baad dataset
+  baad$org_code[i] <- code
+}
+
+# manually assign value for missing organization to its equivalent
+baad$org_code[baad$group == "Sudan Revolutionary Front"] <- 6251
+```
+
+
+```{r, Rename some elements and clean further}
+combined_data_names<- combined_data_names %>% 
+	select(-`Terrorists wounded`, 
+				 -`Terrorists Wounded`, 
+				 -`Foreign wounded`, 
+				 -`US Wounded`, 
+				 -`Tpye of Weapon used`, 
+				 -`...44`) %>%
+	mutate(`# of nationalities` = ifelse(`# of nationalities` == 9 | `# of nationalities` == 99, NA, `# of nationalities`)) %>%
+	mutate(`Total # of nationalities` = ifelse(`Total # of nationalities` == 99, NA, `Total # of nationalities`)) %>%
+	mutate(`Type of state sponsorship` = ifelse(`Type of state sponsorship` == 9, NA, `Type of state sponsorship`)) %>%
+	mutate(`# of terrorist grps directly involved`= ifelse(`# of terrorist grps directly involved` == 9, NA, `# of terrorist grps directly involved`)) %>% 
+	mutate(`# of terrorists in attack force`= ifelse(`# of terrorists in attack force` == 99, NA, `# of terrorists in attack force`)) %>% 
+	mutate(`# of female terrorists`= ifelse(`# of female terrorists` == 99, NA, `# of female terrorists`)) %>% 
+	mutate("Recidivists in attack force" = ifelse("Recidivists in attack force" == 99, NA, `Recidivists in attack force`)) %>% 
+	mutate(`# of victims` = ifelse(`# of victims` == 999, NA, `# of victims`)) %>% 
+	mutate(`Greatest Number of Individuals Wounded` = ifelse(`Greatest Number of Individuals Wounded` == 999, NA, `Greatest Number of Individuals Wounded`)) 
+
+combined_data_names <- combined_data_names %>% mutate(`group`= ifelse(`group`== "UNKNOWN/", "unknown", `group`))
+```
+```{r getting the index (not part of data cleaning)}
+# Print column index and corresponding column names
+for (i in seq_along(names(combined_data_names))) {
+  print(paste("Column index:", i, "Column name:", names(combined_data_names)[i]))
+}
+```
+
+
+# Extended Data on Terrorist Groups
+```{r adding the new dataset to the existing dataset}
+combo_extend <- read_excel("/dissertation/org_list.xlsx")
+combo_extend <- combo_extend %>% select(-`...2`, -`...3`,  -`...4`, -`...5`, -`...6`, -`...7`, -`...8`, -`...9`,)
+combo_extend <- as.data.frame(combo_extend)
+
+# Rename the header 
+colnames(combo_extend) <- c("extended_name", "col")
+
+# Separate the second column into two columns, allowing for extra merges
+combo_extend <- separate(combo_extend, col, into = c("id", "org_name"), extra = "merge") 
+
+# Check if there is an extra column that was created erroneously
+combo_extend <- combo_extend[, c("extended_name", "id", "org_name")]
+
+# Clean out the brackets from both columns
+combo_extend$org_name <- gsub("\\s*\\([^\\)]+\\)", "", combo_extend$org_name)
+combo_extend$extended_name <- gsub("\\s*\\([^\\)]+\\)", "", combo_extend$extended_name)
+
+# remove apostrophes
+combo_extend$extended_name <- gsub('"', "", combo_extend$extended_name)
+combo_extend$org_name <- gsub('"', "", combo_extend$org_name)
+
+# remove square brackets
+combo_extend$extended_name <- gsub("\\[.*?\\]", "", combo_extend$extended_name)
+combo_extend$extended_name <- trimws(combo_extend$extended_name)
+```
+
+```{r}
+# Initialize extend_id column with NA
+combo_extend$extend_id <- NA
+
+# Iterate through each row in combo_extend
+for (i in 1:nrow(combo_extend)) {
+  # Get the value from column 1
+  value1 <- combo_extend$extended_name[i]
+  
+  # Initialize code as NA
+  code <- NA
+  
+  # Iterate through each row in combo_extend to find matching value in column 3
+  for (j in 1:nrow(combo_extend)) {
+    # Get the value from column 3
+    value3 <- combo_extend$org_name[j]
+    
+    # Check if value1 matches any part of value3 using regex
+    if (!is.na(value1) && !is.na(value3) && grepl(value1, value3, ignore.case = TRUE)) {
+      # If a match is found, assign the corresponding code from column 2
+      code <- combo_extend$id[j]
+      break  # Exit the loop if a match is found
+    }
+  }
+  
+  # Assign the code to extend_id
+  combo_extend$extend_id[i] <- code
+}
+
+combo_extend$extend_id[combo_extend$extended_name == "23rd of September Communist League"] <- 0703
+combo_extend$extend_id[combo_extend$extended_name == "2nd of June Movement"] <- 2552
+
+#remove leading 0's
+combo_extend$extend_id <- gsub("^0+", "", combo_extend$extend_id)
+
+combo_extend_selected <- combo_extend %>% 
+	select(-org_name, -id)%>% 
+	rename(gname = extended_name)
+
+```
+
+```{r add the ID info back into the other dataframe}
+extend <- read_excel("/dissertation/EDTG_Data.xls")
+extend <- extend %>% select(-gid)
+# re-clean the elements in the other table to make it fit 
+extend$gname <- gsub("\\s*\\([^\\)]+\\)", "", extend$gname)
+
+# left join 
+extended_terror <- left_join(extend, combo_extend_selected, by = "gname")
+
+extended_terror <- extended_terror %>% 
+	rename(Year = year)
+```
+
+
+# Building a SQL-friendly Database
+```{r}
+group_db <- DBI::dbConnect(RSQLite::SQLite(), "group_db.db")
+dbWriteTable(group_db, "combined_data_names", combined_data_names)
+dbWriteTable(group_db, "baad", baad)
+dbWriteTable(group_db, "extended_terror", extended_terror)
+```
+
+```{r}
+extended_terror <- extended_terror %>% 
+	rename(group = gname)
+# Assuming df1 and df2 are your two data frames
+full_combined <- merge(baad, extended_terror, by = c("group", "Year"), all = TRUE)
+full_combined <- full_combined %>% 
+	select(-c(torg, torg_year, hbccode, hbiso, hb_iso_cc))
+
+dbWriteTable(group_db, "final_data", full_combined)
+```
+
+
+
+

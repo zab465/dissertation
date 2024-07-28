@@ -1,0 +1,558 @@
+---
+title: "data imputation"
+output: html_document
+date: "2024-06-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE, warning = FALSE}
+library(DBI)
+library(tidyverse)
+library(glmnet)
+library(randomForest)
+library(mice)
+library(VIM)
+library(countrycode)
+library(caret)
+library(missForest)
+```
+
+## Loading Data & Preliminary Cleaning of Final Dataset (pre-imputation)
+Data stored in the relational database
+```{r}
+group_db <- DBI::dbConnect(RSQLite::SQLite(), "group_db.db")
+final_data <- dbGetQuery(group_db, "
+												 SELECT *
+												 FROM final_data;")
+
+```
+
+```{rRemoving post variables}
+final_data <- final_data %>% 
+	select(-c(total_atks, total_casualties, nonterr_casualties, terr_POP, diversity, shr_trans, peak_size, diversity))
+```
+
+
+## Cleaning data from redundancies 
+
+```{r, reconciling the values from different datasets on the same variables} 
+# using max because we are interested in all observed behavior 
+
+# drug trafficking 
+final_data$combined_drug_trafficking <- pmax(final_data$drugtk, final_data$fddrugtk, na.rm = TRUE)
+final_data$combined_drug_trafficking <- as.factor(final_data$combined_drug_trafficking)
+levels(final_data$combined_drug_trafficking) <- c(0,1)
+
+# kidnapping
+final_data$combined_kidnap <- pmax(final_data$kidnap, final_data$fdkidnap, na.rm = TRUE)
+final_data$combined_kidnap <- as.factor(final_data$combined_kidnap)
+levels(final_data$combined_kidnap) <- c(0,1)
+
+# state sponsorship
+final_data$combined_state_sponsor <- pmax(final_data$state_sponsor, final_data$fdstate, na.rm = TRUE)
+final_data$combined_state_sponsor <- as.factor(final_data$combined_state_sponsor)
+levels(final_data$combined_state_sponsor) <- c(0,1)
+
+# existence of hierarchy
+final_data$combined_hierarch <- pmax(final_data$lead_hierarch.x, final_data$lead_hierarch.y, na.rm = TRUE)
+final_data$combined_hierarch <- as.factor(final_data$combined_hierarch)
+levels(final_data$combined_hierarch) <- c(0,1)
+
+# existence of leftist ideology
+final_data$combined_left <- pmax(final_data$left.x, final_data$left.y, na.rm = TRUE)
+final_data$combined_left <- as.factor(final_data$combined_left)
+levels(final_data$combined_left) <- c(0,1)
+
+# existence of religious ideology 
+final_data$combined_reli <- pmax(final_data$reli, final_data$rel, na.rm = TRUE)
+final_data$combined_reli <- as.factor(final_data$combined_reli)
+levels(final_data$combined_reli) <- c(0,1)
+
+# group controls land (yes, no)
+final_data$combined_terrctrl <- pmax(final_data$terrcntrl, final_data$terrctrl, na.rm = TRUE)
+final_data$combined_terrctrl <- as.factor(final_data$combined_terrctrl)
+levels(final_data$combined_terrctrl) <- c(0,1)
+
+# number of deaths caused by the organization in a given year
+final_data$combined_deaths <- pmax(final_data$ucdpbd, final_data$total_deaths, na.rm = TRUE)
+
+# social services
+# if 9 then NA and then pmax
+final_data <- final_data %>%
+  mutate(social_service = ifelse(social_service == 9, NA, social_service))
+final_data$soc_service <- pmax(final_data$socsvcs, final_data$social_service, na.rm = TRUE)
+
+# duration/organization age
+final_data$combined_duration <- pmax(final_data$age, final_data$duration, na.rm = TRUE)
+```
+
+```{r Reconciling and combining information about the base of the organization}
+# Function to merge 'hbase' and 'base' columns
+merge_bases <- function(hbase, base) {
+  # Split the 'base' column by comma and convert to list of vectors
+  base_split <- strsplit(base, ",\\s*")
+  
+  # Combine 'hbase' and 'base_split' into a single list of vectors
+  combined <- mapply(function(h, b) {
+    unique(na.omit(c(h, unlist(b))))
+  }, hbase, base_split, SIMPLIFY = FALSE)
+  
+  # Convert list of vectors to a single string with comma separation
+  combined <- sapply(combined, function(x) {
+    if (length(x) == 0) return(NA)
+    paste(x, collapse = ", ")
+  })
+  
+  return(combined)
+}
+
+# Apply the function to the dataset
+final_data$combined_base <- merge_bases(final_data$hbase, final_data$base)
+```
+
+```{r BASE COUNTS}
+# Function to count the number of countries in combined_base
+count_bases <- function(base_str) {
+	return(length(strsplit(base_str, ",\\s*")[[1]]))
+}
+
+# Apply the function to create num_bases column
+final_data$num_base <- sapply(final_data$combined_base, count_bases)
+
+base_counts <- final_data %>% select(num_base, combined_base )
+```
+
+```{r Binary multiple bases}
+final_data <- final_data %>%
+  mutate(mul_bases = ifelse(num_base > 1, 1, 0))
+```
+
+## Region level-variables
+Homogenizing the region variables and codes in the dataset 
+Missingness can here be clearly dealt with before imputation by process of using the region names to fill in the binary variables
+
+```{r loading package for regional belonging}
+# Get all country names
+all_countries <- countrycode::codelist$country.name.en
+
+# Get the region for each country
+regions <- countrycode(all_countries, "country.name", "region")
+
+# Combine country names and regions into a data frame
+country_region_df <- data.frame(country = all_countries, region = regions)
+```
+```{r EAST ASIA AND PACIFIC}
+# Filter countries in the East Asia & Pacific region
+eap_countries <- country_region_df %>%
+  filter(region == "East Asia & Pacific") %>%
+  pull(country)
+# Function to check if any country in combined_base is in the EAP region
+is_eap <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% eap_countries)
+}
+
+# Update EAP based on combined_base
+final_data <- final_data %>%
+  mutate(EAP = ifelse(is.na(EAP), sapply(combined_base, is_eap), EAP))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(EAP = ifelse(EAP, 1, 0))
+```
+
+```{r EUROPE AND CENTRAL ASIA}
+eca_countries <- country_region_df %>%
+  filter(region == "Europe & Central Asia") %>%
+  pull(country)
+
+is_eca <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% eca_countries)
+}
+
+# Update ECA based on combined_base
+final_data <- final_data %>%
+  mutate(ECA = ifelse(is.na(ECA), sapply(combined_base, is_eca), ECA))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(ECA = ifelse(ECA, 1, 0))
+```
+
+```{r LATIN AMERICA AND CARRIBEAN}
+lac_countries <- country_region_df %>%
+  filter(region == "Latin America & Caribbean") %>%
+  pull(country)
+
+is_lac <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% lac_countries)
+}
+
+# Update LAC based on combined_base
+final_data <- final_data %>%
+  mutate(LAC = ifelse(is.na(LAC), sapply(combined_base, is_lac), LAC))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(LAC = ifelse(LAC, 1, 0))
+```
+
+```{r MIDDLE EAST AND NORTH AFRICA}
+mena_countries <- country_region_df %>%
+  filter(region == "Middle East & North Africa") %>%
+  pull(country)
+
+is_mena <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% mena_countries)
+}
+
+# Update MENA based on combined_base
+final_data <- final_data %>%
+  mutate(MENA = ifelse(is.na(MENA), sapply(combined_base, is_mena), MENA))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(MENA = ifelse(MENA, 1, 0))
+```
+
+```{r NORTH AMERICA}
+na_countries <- country_region_df %>%
+  filter(region == "North America") %>%
+  pull(country)
+
+final_data <- final_data %>% 
+	rename(North_America = "NA")
+
+is_na <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% na_countries)
+}
+
+# Update NA based on combined_base
+final_data <- final_data %>%
+  mutate(North_America = ifelse(is.na(North_America), sapply(combined_base, is_na), North_America))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(North_America = ifelse(North_America, 1, 0))
+```
+
+```{r SOUTH ASIA}
+sas_countries <- country_region_df %>%
+  filter(region == "South Asia") %>%
+  pull(country)
+
+is_sas <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% sas_countries)
+}
+
+# Update SAS based on combined_base
+final_data <- final_data %>%
+  mutate(SAS = ifelse(is.na(SAS), sapply(combined_base, is_sas), SAS))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(SAS = ifelse(SAS, 1, 0))
+```
+
+```{r SUB-SAHARAN AFRICA}
+ssa_countries <- country_region_df %>%
+  filter(region == "Sub-Saharan Africa") %>%
+  pull(country)
+
+is_ssa <- function(base) {
+  if (is.na(base)) return(NA)
+  countries <- strsplit(base, ",\\s*")[[1]]
+  any(countries %in% ssa_countries)
+}
+
+# Update SSA based on combined_base
+final_data <- final_data %>%
+  mutate(SSA = ifelse(is.na(SSA), sapply(combined_base, is_ssa), SSA))
+
+# Convert logical to binary (1 for TRUE, 0 for FALSE)
+final_data <- final_data %>%
+  mutate(SSA = ifelse(SSA, 1, 0))
+```
+
+## Size 
+```{r reconciling the org. size variables}
+# re-organizing the levels 
+final_data$size <- ifelse(final_data$size == 1, 1, final_data$size)
+final_data$size <- ifelse(final_data$size == 10, 2, final_data$size)
+final_data$size <- ifelse(final_data$size == 100, 3, final_data$size)
+final_data$size <- ifelse(final_data$size == 1000, 4, final_data$size)
+final_data$size <- ifelse(final_data$size == 10000, 5, final_data$size)
+final_data$combined_size <- pmax(final_data$size, final_data$size_rec, na.rm = TRUE)
+final_data$combined_size <- as.factor(final_data$combined_size)
+levels(final_data$combined_size) <- c(1, 2, 3, 4, 5)
+```
+
+```{r}
+# removing redundant variables from the original dataset 
+final_data <- final_data %>% 
+	select(-c(drugtk, fddrugtk, kidnap, fdkidnap, state_sponsor, 
+						fdstate, lead_hierarch.x, lead_hierarch.y, left.x, 
+						left.y, reli, rel, extend_id, terrcntrl, terrctrl, 
+						ucdpbd, total_deaths, 
+						size, size_rec, org_code, socsvcs, social_service, 
+						age, duration, base, hbase, 
+						terr_deaths, terr_injuries, nonterr_deaths, terr_casualties, 
+						nonterr_injuries, total_injuries, combined_deaths))
+
+```
+
+
+
+## Crime Variables
+
+```{r reduce missingness on group-identity by using other ideology information}
+# function to update the values in the combined_left variable to reflect the contents of the other columns
+# left wing ideology 
+update_combined_left <- function(df) {
+  df %>%
+    mutate(combined_left = ifelse(is.na(combined_left) & (right == 1 | combined_reli == 1 | nat == 1), 
+                                  0, combined_left))
+}
+
+# Reducing the missingness in those columns
+final_data <- update_combined_left(final_data)
+
+# right wing ideology 
+update_right <- function(df){
+	df %>% 
+		mutate(right = ifelse(is.na(right) & (combined_left == 1 | combined_reli == 1 | nat == 1),
+													0, right))
+}
+# reduce the missingness
+final_data <- update_right(final_data)
+
+
+# religious ideology 
+update_relig <- function(df){
+	df %>% 
+		mutate(combined_reli = ifelse(is.na(combined_reli) & (combined_left == 1 | right == 1 | nat == 1), 
+																		 0, combined_reli))
+}
+final_data <- update_relig(final_data)
+
+# nationalism
+update_nat <- function(df){
+	df %>% 
+		mutate(nat = ifelse(is.na(nat) & (combined_left == 1 | right == 1 | combined_reli == 1), 
+												0, nat))
+}
+final_data <- update_nat(final_data)
+
+# territorial change
+update_terr <- function(df){
+	df %>% 
+		mutate(tch = ifelse(is.na(tch) & (nat == 1), 
+												1, tch)) %>% 
+		mutate(tch = ifelse(is.na(tch) & (sq == 1), 
+												0, tch))
+}
+final_data <- update_terr(final_data)
+
+# update status quo 
+update_sq <- function(df){
+	df %>% 
+		mutate(sq = ifelse(is.na(sq) & (pch == 1 | ercsr == 1 | tch == 1), 
+											 0, sq)) %>% 
+		mutate(sq = ifelse(is.na(sq) & (pch == 0 & ercsr == 0 & tch == 0), 
+											 1, sq))
+}
+final_data <- update_sq(final_data)
+
+# policy change
+update_pch <- function(df){
+	df %>% 
+		mutate(pch = ifelse(is.na(pch) & (sq == 1), 0, pch))
+}
+final_data <- update_pch(final_data)
+
+# regime change
+update_ercsr <- function(df){
+	df %>% 
+		mutate(ercsr = ifelse(is.na(ercsr) & (sq == 1), 0, ercsr))
+}
+final_data <- update_ercsr(final_data)
+```
+
+```{r reducing crime missingness by assuming unobserved crime = no crime}
+# we can assume that if it has been unobserved it didn't happen, just like Asal et al. 2016 do for their original dataset 
+final_data <- final_data %>% 
+	mutate(combined_drug_trafficking = ifelse(is.na(combined_drug_trafficking), 0, combined_drug_trafficking)) %>% 
+	mutate(combined_kidnap = ifelse(is.na(combined_kidnap), 0, combined_kidnap)) %>% 
+	mutate(fdsmuggl = ifelse(is.na(fdsmuggl), 0, fdsmuggl)) %>% 
+	mutate(fdrob = ifelse(is.na(fdrob), 0, fdrob)) %>% 
+	mutate(fdextort = ifelse(is.na(fdextort), 0, fdextort)) %>% 
+	mutate(combined_state_sponsor = ifelse(is.na(combined_state_sponsor), 0, combined_state_sponsor))
+
+final_data <- final_data %>% 
+	mutate(combined_terrctrl = ifelse(is.na(combined_terrctrl), 0, combined_terrctrl))
+```
+
+
+```{r re-conciling the social services variables}
+# amending social control: if a group  == 1 in "social_service" then it should be == 1 in public service
+final_data <- final_data %>%
+  group_by(group) %>%
+  mutate(
+    public_service = case_when(
+      soc_service == 1 ~ 1,  # Step 1: If social_service is 1, public_service should be 1
+      any(soc_service == 1) ~ 1
+    )
+  ) %>%
+  ungroup() 
+```
+
+```{r}
+final_data <- final_data %>%
+  mutate(fdextort = factor(fdextort)) %>% 
+	mutate(fdsmuggl = factor(fdsmuggl)) %>% 
+	mutate(fdrob = factor(fdrob)) %>% 
+	mutate(end = factor(end)) %>% 
+	mutate(ethn = factor(ethn)) %>% 
+	mutate(nat = factor(nat)) %>% 
+	mutate(right = factor(right)) %>% 
+	mutate(ercsr = factor(ercsr)) %>% 
+	mutate(pch = factor(pch)) %>% 
+	mutate(sq = factor(sq)) %>% 
+	mutate(tch = factor(tch)) %>% 
+	mutate(crim_degr_py = as.numeric(crim_degr_py)) %>% 
+	mutate(num_base = as.numeric(num_base)) %>% 
+	mutate(endstr = factor(endstr)) %>% 
+	mutate(public_service = factor(public_service)) %>% 
+	mutate(fate_leader = factor(fate_leader)) %>% 
+	mutate(mul_bases = factor(mul_bases)) %>% 
+	mutate(soc_service = factor(soc_service)) %>% 
+	mutate(EAP = factor(EAP)) %>% 
+	mutate(ECA = factor(ECA)) %>% 
+	mutate(LAC = factor(LAC)) %>% 
+	mutate(MENA = factor(MENA)) %>% 
+	mutate(North_America = factor(North_America)) %>% 
+	mutate(SAS = factor(SAS)) %>% 
+	mutate(SSA = factor(SSA)) %>% 
+	mutate(num_sponsor = as.numeric(num_sponsor)) %>% 
+	mutate(num_allies = as.numeric(num_allies)) %>% 
+	mutate(num_rivals = as.numeric(num_rivals)) %>% 
+	mutate(num_enemies = as.numeric(num_enemies)) %>% 
+	mutate(combined_size = factor(combined_size)) %>% 
+  mutate(combined_reli = factor(combined_reli, levels = c(0,1))) %>% 
+  mutate(combined_left = factor(combined_left, levels = c(0,1))) %>% 
+  mutate(combined_hierarch = factor(combined_hierarch)) %>% 
+  mutate(combined_drug_trafficking = factor(combined_drug_trafficking, levels = c(0,1))) %>%
+  mutate(combined_kidnap = factor(combined_kidnap, levels = c(0,1))) %>%
+  mutate(combined_state_sponsor = factor(combined_state_sponsor, levels = c(0,1))) %>%
+  mutate(combined_terrctrl = factor(combined_terrctrl, levels = c(0,1)))
+
+
+# removing columns with too many levels for imputation
+# these have no missing data
+final_data_imp <- final_data %>% 
+	select(-group, - combined_base) 
+
+final_data_imp <- as.data.frame(final_data_imp)
+```
+
+## Imputation
+Imputing using missForest and then saving file as a CSV
+```{r, warning = FALSE, message=FALSE}
+control_params <- trainControl(method = "cv", number = 5)
+
+# Define mtry options
+mtry_grid <- expand.grid(mtry = c(2, 5, sqrt(ncol(final_data_imp)), 10))
+
+# Train missForest models with different mtry values using cross-validation
+missForest_models <- lapply(mtry_grid$mtry, function(mtry) {
+  missForest(final_data_imp, maxiter = 10, ntree = 100, replace = TRUE, mtry = mtry)
+})
+
+# Extract the OOBerror (NRMSE) from each run
+nrmse_values <- sapply(missForest_models, function(model) model$OOBerror[1])
+
+# Find the optimal mtry value
+optimal_mtry <- mtry_grid$mtry[which.min(nrmse_values)]
+
+# Train missForest model with the optimal mtry value
+optimal_missForest_model <- missForest(final_data_imp, maxiter = 10, ntree = 100, replace = TRUE, mtry = optimal_mtry)
+
+# Impute missing values in the original dataset using the trained model
+imputed_data_train <- optimal_missForest_model$ximp
+
+# evaluating performance
+optimal_oob_error <- mean(optimal_missForest_model$OOBerror)
+
+# Print the perf
+cat("Optimal model's OOB error is:", optimal_oob_error)
+```
+
+```{r binding back the year and the combined base into the dataframe}
+cols_to_add <- final_data %>% 
+	select(group, combined_base)
+final_data_complete <- cbind(cols_to_add, imputed_data_train)
+str(final_data_complete)
+```
+
+```{r no need to run this}
+final_data_complete <- final_data_complete %>%
+  mutate(fdextort = factor(fdextort, levels = c(0,1))) %>% 
+	mutate(fdsmuggl = factor(fdsmuggl, levels = c(0,1))) %>% 
+	mutate(fdrob = factor(fdrob, levels = c(0,1))) %>% 
+	mutate(end = factor(end)) %>% 
+	mutate(ethn = factor(ethn)) %>% 
+	mutate(nat = factor(nat)) %>% 
+	mutate(right = factor(right)) %>% 
+	mutate(ercsr = factor(ercsr)) %>% 
+	mutate(pch = factor(pch)) %>% 
+	mutate(sq = factor(sq)) %>% 
+	mutate(tch = factor(tch)) %>% 
+	mutate(crim_degr_py = as.numeric(crim_degr_py)) %>% 
+	mutate(num_base = as.numeric(num_base)) %>% 
+	mutate(endstr = factor(endstr)) %>% 
+	mutate(public_service = factor(public_service)) %>% 
+	mutate(fate_leader = factor(fate_leader)) %>% 
+	mutate(mul_bases = factor(mul_bases)) %>% 
+	mutate(soc_service = factor(soc_service)) %>% 
+	mutate(EAP = factor(EAP)) %>% 
+	mutate(ECA = factor(ECA)) %>% 
+	mutate(LAC = factor(LAC)) %>% 
+	mutate(MENA = factor(MENA)) %>% 
+	mutate(North_America = factor(North_America)) %>% 
+	mutate(SAS = factor(SAS)) %>% 
+	mutate(SSA = factor(SSA)) %>% 
+	mutate(num_sponsor = as.numeric(num_sponsor)) %>% 
+	mutate(num_allies = as.numeric(num_allies)) %>% 
+	mutate(num_rivals = as.numeric(num_rivals)) %>% 
+	mutate(num_enemies = as.numeric(num_enemies)) %>% 
+	mutate(combined_size = factor(combined_size)) %>% 
+  mutate(combined_reli = as.factor(combined_reli)) %>% 
+  mutate(combined_left = as.factor(combined_left)) %>% 
+  mutate(combined_hierarch = as.factor(combined_hierarch)) %>% 
+  mutate(combined_drug_trafficking = as.factor(combined_drug_trafficking)) %>%
+  mutate(combined_kidnap = as.factor(combined_kidnap)) %>%
+  mutate(combined_state_sponsor = as.factor(combined_state_sponsor)) %>%
+  mutate(combined_terrctrl = as.factor(combined_terrctrl))
+```
+
+```{r save to csv}
+write.csv(final_data_complete, "imputed_cleaned_data.csv")
+````
+
+
+
+

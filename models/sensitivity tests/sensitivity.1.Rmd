@@ -1,0 +1,454 @@
+---
+title: "Sensitivity 1"
+output: html_document
+date: "2024-07-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(DBI)
+library(glmnet)
+library(themis)
+library(ROSE)
+library(caret)
+library(purrr)
+library(vcd)
+library(DescTools)
+library(knitr)
+library(kableExtra)
+library(stargazer)
+library(sandwich)
+library(lmtest)
+library(pscl)
+library(blorr)
+```
+
+```{r loading data}
+data <- read.csv("imputed_cleaned_data.csv")
+data <- data %>% 
+	mutate(group = factor(group))
+```
+
+```{r}
+data <- data %>%
+  mutate(fdextort = factor(fdextort, levels = c(0, 1))) %>% 
+	mutate(fdsmuggl = factor(fdsmuggl, levels = c(0, 1))) %>% 
+	mutate(fdrob = factor(fdrob, levels = c(0, 1))) %>% 
+	mutate(mul_bases = factor(mul_bases, levels = c(0, 1))) %>% 
+	mutate(crim_degr_py = as.numeric(crim_degr_py)) %>% 
+	mutate(endstr = factor(endstr, levels = c(0, 1, 2, 3, 4, 5))) %>% 
+	mutate(end = factor(end, levels = c(0, 1))) %>% 
+	mutate(ethn = factor(ethn, levels = c(0, 1))) %>% 
+	mutate(EAP = factor(EAP, levels = c(0, 1))) %>% 
+	mutate(ECA = factor(ECA, levels = c(0, 1))) %>% 
+	mutate(LAC = factor(LAC, levels = c(0, 1))) %>% 
+	mutate(MENA = factor(MENA, levels = c(0, 1))) %>% 
+	mutate(North_America = factor(North_America, levels = c(0, 1))) %>% 
+	mutate(SAS = factor(SAS, levels = c(0, 1))) %>% 
+	mutate(SSA = factor(SSA, levels = c(0, 1))) %>% 
+	mutate(nat = factor(nat, levels = c(0, 1))) %>% 
+	mutate(right = factor(right, levels = c(0, 1))) %>% 
+	mutate(ercsr = factor(ercsr, levels = c(0, 1))) %>% 
+	mutate(pch = factor(pch, levels = c(0, 1))) %>% 
+	mutate(sq = factor(sq, levels = c(0, 1))) %>% 
+	mutate(tch = factor(tch, levels = c(0, 1))) %>% 
+	mutate(public_service = factor(public_service, levels = c(0, 1))) %>% 
+	mutate(fate_leader = factor(fate_leader, levels = c(0, 1, 2))) %>% 
+	mutate(soc_service = factor(soc_service, levels = c(0, 1))) %>% 
+	mutate(combined_size = factor(combined_size, levels = c("1", "2", "3", "4", "5"))) %>% 
+  mutate(combined_reli = factor(combined_reli, levels = c(0, 1))) %>% 
+  mutate(combined_left = factor(combined_left, levels = c(0, 1))) %>% 
+  mutate(combined_hierarch = factor(combined_hierarch, levels = c(0, 1))) %>% 
+  mutate(combined_drug_trafficking = factor(combined_drug_trafficking, levels = c(0, 1))) %>%
+  mutate(combined_kidnap = factor(combined_kidnap, levels = c(0, 1))) %>%
+  mutate(combined_state_sponsor = factor(combined_state_sponsor, levels = c(0, 1))) %>%
+  mutate(combined_terrctrl = factor(combined_terrctrl, levels = c(0, 1)))
+```
+```{r logging the continuous variables}
+small_constant <- 0.00001
+data <- data %>% 
+	mutate(crim_degr_py = sqrt(crim_degr_py + small_constant)) %>% 
+	mutate(combined_size = ifelse(combined_size == 1, 10, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 2, 100, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 3, 1000, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 4, 5000, combined_size)) %>%
+	mutate(combined_size = ifelse(combined_size == 1, 10000, combined_size)) %>%
+	mutate(combined_size = as.numeric(combined_size)) %>%
+	mutate(combined_size = sqrt(combined_size + small_constant)) %>% 
+	mutate(combined_duration = sqrt(combined_duration + small_constant))
+```
+
+
+### Creating new variables for ideologies
+
+```{r}
+data <- data %>% 
+	mutate(pure_religious = ifelse(combined_reli == 1 & (nat == 0 & ethn == 0 & combined_left == 0 & ercsr == 0 & right == 0), 1, 0)) %>% 
+	mutate(pure_secular = ifelse((ethn == 1 & combined_reli == 0) |(combined_left == 1 & combined_reli == 0) |(ercsr == 1 & combined_reli ==0) |(right == 1 & combined_reli == 0), 1, 0)) %>% 
+	mutate(secular_hybrid = ifelse(((ethn == 1 & combined_reli == 0) &(combined_left == 1 | ercsr == 1 | right == 1)) | 
+														((combined_left == 1 & combined_reli == 0) &(ethn == 1 | ercsr == 1 | right == 1)) |
+														((ercsr == 1 & combined_reli ==0) & (ethn == 1 |  combined_left == 1 | right == 1)) |
+														((right == 1 & combined_reli == 0) & (ethn == 1 |  ercsr == 1 | combined_left == 1)), 1, 0)) %>% 
+	mutate(hybrid_religious = ifelse(combined_reli == 1 & (ethn == 1 | combined_left == 1 | ercsr == 1 | right == 1), 1, 0))
+```
+
+
+```{r making individual datasets based on outcome variables}
+extortion_data <- data %>% 
+	select(-c(fdrob, fdsmuggl, combined_drug_trafficking, combined_kidnap)) 
+robbery_data <- data %>% 
+	select(-c(fdextort,fdsmuggl, combined_drug_trafficking, combined_kidnap))
+smuggling_data <- data %>% 
+	select(-c(fdextort, fdrob, combined_drug_trafficking, combined_kidnap))
+drug_data <- data %>% 
+	select(-c(fdextort, fdrob, fdsmuggl, combined_kidnap))
+kidnap_data <- data %>% 
+	select(-c(fdextort, fdrob, fdsmuggl, combined_drug_trafficking))
+```
+
+```{r cluster error function}
+cluster_se <- function(model, cluster) {
+  # Get model matrix
+  X <- model.matrix(model)
+  # Get number of clusters
+  cluster <- as.factor(cluster)
+  M <- length(unique(cluster))
+  N <- length(cluster)
+  K <- model$rank
+  # Calculate degrees of freedom adjustment
+  dfc <- (M / (M - 1)) * ((N - 1) / (N - K))
+  # Calculate the "meat" of the sandwich
+  uj <- apply(estfun(model), 2, function(x) tapply(x, cluster, sum))
+  meat <- crossprod(uj) / N
+  # Calculate clustered standard errors
+  se <- sqrt(diag(dfc * sandwich(model, meat = meat)))
+  return(se)
+}
+```
+
+
+### Ridge on resampled and OG specs (sensitivity 1) 
+
+```{r resampling}
+library(ROSE)
+ex_rose <- ovun.sample(fdextort ~ ., data = extortion_data, method = "over", N = 2 * sum(extortion_data$fdextort == 0))$data
+smuggl_rose <- ovun.sample(fdsmuggl ~ ., data = smuggling_data, method = "over", N = 2 * sum(smuggling_data$fdsmuggl == 0))$data
+rob_rose <- ovun.sample(fdrob ~ ., data = robbery_data, method = "over", N = 2 * sum(robbery_data$fdrob == 0))$data
+kidnap_rose <- ovun.sample(combined_kidnap ~ ., data = kidnap_data, method = "over", N = 2 * sum(kidnap_data$combined_kidnap == 1))$data
+drug_rose <- ovun.sample(combined_drug_trafficking ~ ., data = drug_data, method = "over", N = 2 * sum(drug_data$combined_drug_trafficking == 0))$data
+
+
+# turning size into a continuous variable
+ex_rose <- ex_rose %>% 
+	mutate(combined_size = as.numeric(combined_size))
+
+smuggl_rose <- smuggl_rose %>% 
+	mutate(combined_size = as.numeric(combined_size))
+
+rob_rose <- rob_rose %>% 
+	mutate(combined_size = as.numeric(combined_size))
+
+kidnap_rose <- kidnap_rose %>% 
+	mutate(combined_size = as.numeric(combined_size))
+
+drug_rose <- drug_rose %>% 
+	mutate(combined_size = as.numeric(combined_size))
+```
+
+```{r extortion cv glmnet}
+# Prepare the data
+set.seed(43)
+X_ex <- model.matrix(fdextort ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,  
+                  data = ex_rose)[, -1] # Remove the intercept column
+y_ex <- ex_rose$fdextort
+
+# Fit the ridge logistic regression model
+ridge_model_ex <- cv.glmnet(X_ex, y_ex, family = "binomial", alpha = 0)
+
+# Extract coefficients from the ridge model at a chosen lambda (e.g., lambda.min)
+chosen_lambda_ex <- ridge_model_ex$lambda.min
+ridge_coefficients_ex <- coef(ridge_model_ex, s = chosen_lambda_ex)
+
+# Prepare the start values for glm using ridge coefficients
+start_val_ex <- as.vector(ridge_coefficients_ex)
+
+# Function to calculate clustered standard errors
+cluster_se <- function(model, cluster_variable) {
+  # Calculate the clustered variance-covariance matrix
+  vcov_clustered <- vcovCL(model, cluster = cluster_variable)
+  
+  # Get the standard errors
+  se_clustered <- sqrt(diag(vcov_clustered))
+  
+  # Return the standard errors
+  return(se_clustered)
+}
+
+# Create a logistic regression model with glm() to use for clustered SE calculation
+extortion_lm1 <- glm(fdextort ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                      data = ex_rose, 
+                      family = binomial(link = "logit"), 
+										 start = start_val_ex)
+
+# Calculate clustered standard errors using the "Year" variable
+clustered_ex <- cluster_se(extortion_lm1, ex_rose$Year)
+```
+
+```{r robbery cv glmnet}
+set.seed(43)
+# Prepare the data
+X_rob <- model.matrix(fdrob ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                  data = rob_rose)[, -1] # Remove the intercept column
+y_rob <- rob_rose$fdrob
+
+# Fit the ridge logistic regression model
+ridge_model_rob <- cv.glmnet(X_rob, y_rob, family = "binomial", alpha = 0)
+
+# Extract coefficients from the ridge model at a chosen lambda (e.g., lambda.min)
+chosen_lambda_rob <- ridge_model_rob$lambda.min
+ridge_coefficients_rob <- coef(ridge_model_rob, s = chosen_lambda_rob)
+
+# Prepare the start values for glm using ridge coefficients
+start_val_rob <- as.vector(ridge_coefficients_rob)
+
+# Create a logistic regression model with glm() to use for clustered SE calculation
+rob_lm1 <- glm(fdrob ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                      data = rob_rose, 
+                      family = binomial(link = "logit"), 
+							 start = start_val_rob)
+
+# Calculate clustered standard errors using the "Year" variable
+clustered_rob <- cluster_se(rob_lm1, rob_rose$Year)
+```
+
+```{r smuggling cv glmnet}
+set.seed(43)
+# Prepare the data
+X_smug <- model.matrix(fdsmuggl ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,     
+                  data = smuggl_rose)[, -1] # Remove the intercept column
+y_smug <- smuggl_rose$fdsmuggl
+
+# Fit the ridge logistic regression model
+ridge_model_smug <- cv.glmnet(X_smug, y_smug, family = "binomial", alpha = 0)
+
+# Extract coefficients from the ridge model at a chosen lambda (e.g., lambda.min)
+chosen_lambda_smug <- ridge_model_smug$lambda.min
+ridge_coefficients_smug <- coef(ridge_model_smug, s = chosen_lambda_smug)
+# Prepare the start values for glm using ridge coefficients
+start_val_smug <- as.vector(ridge_coefficients_smug)
+
+# Create a logistic regression model with glm() to use for clustered SE calculation
+smug_lm1 <- glm(fdsmuggl ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                      data = smuggl_rose, 
+                      family = binomial(link = "logit"), 
+								start = start_val_smug)
+
+# Calculate clustered standard errors using the "Year" variable
+clustered_smug <- cluster_se(smug_lm1, smuggl_rose$Year)
+```
+
+```{r NEW APPROACH DRUGS}
+# Prepare the data
+set.seed(43)
+X_drug <- model.matrix(combined_drug_trafficking ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                  data = drug_rose)[, -1] # Remove the intercept column
+y_drug <- drug_rose$combined_drug_trafficking
+
+# Fit the ridge logistic regression model
+ridge_model_drug <- cv.glmnet(X_drug, y_drug, family = "binomial", alpha = 0)
+
+# Extract coefficients from the ridge model at a chosen lambda (e.g., lambda.min)
+chosen_lambda_drug <- ridge_model_drug$lambda.min
+ridge_coefficients_drug <- coef(ridge_model_drug, s = chosen_lambda_drug)
+# Prepare the start values for glm using ridge coefficients
+start_val_drug <- as.vector(ridge_coefficients_drug)
+
+# Create a logistic regression model with glm() to use for clustered SE calculation
+drug_lm1 <- glm(combined_drug_trafficking ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                      data = drug_rose, 
+                      family = binomial(link = "logit"), 
+								start = start_val_drug)
+
+# Calculate clustered standard errors using the "Year" variable
+clustered_drug <- cluster_se(drug_lm1, drug_rose$Year)
+```
+
+
+
+```{r kidnap ridge regression} 
+set.seed(43)
+# Prepare the data
+X_kid <- model.matrix(combined_kidnap ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,   
+                  data = kidnap_rose)[, -1] # Remove the intercept column
+y_kid <- kidnap_rose$combined_kidnap
+
+
+# Fit the ridge logistic regression model
+ridge_model_kidnap <- cv.glmnet(X_kid, y_kid, family = "binomial", alpha = 0)
+
+# Extract coefficients from the ridge model at a chosen lambda (e.g., lambda.min)
+chosen_lambda_kid <- ridge_model_kidnap$lambda.min
+ridge_coefficients_kidnap <- coef(ridge_model_kidnap, s = chosen_lambda_kid)
+
+# Prepare the start values for glm using ridge coefficients
+start_vals <- as.vector(ridge_coefficients_kidnap)
+
+# Create a logistic regression model with glm() to use for clustered SE calculation
+kid_lm1 <- glm(combined_kidnap ~ combined_terrctrl + combined_duration + combined_state_sponsor + crim_degr_py +combined_size +  pure_religious + pure_secular + secular_hybrid + hybrid_religious +Year,    
+                      data = kidnap_rose, 
+                      family = binomial(link = "logit"),
+                      start = start_vals)
+
+
+# Calculate clustered standard errors using the "Year" variable
+clustered_kid <- cluster_se(kid_lm1, kidnap_rose$Year)
+```
+
+```{r mcfadden scores}
+##ROBBERY
+# Calculate pseudo R-squared values
+mcfadden_robbery <- blr_rsq_mcfadden_adj(rob_lm1)
+adjusted_mcfadden_robbery <- blr_rsq_mcfadden(rob_lm1)
+
+
+##KIDNAP
+
+mcfadden_kidnap <- blr_rsq_mcfadden_adj(kid_lm1)
+adjusted_mcfadden_kidnap <- blr_rsq_mcfadden(kid_lm1)
+
+
+##EXTORTION 
+mcfadden_extortion <- blr_rsq_mcfadden_adj(extortion_lm1)
+adjusted_mcfadden_extortion <- blr_rsq_mcfadden(extortion_lm1)
+
+##SMUGGLING
+mcfadden_smuggling <- blr_rsq_mcfadden_adj(smug_lm1)
+adjusted_mcfadden_smug <- blr_rsq_mcfadden(smug_lm1)
+
+
+## DRUGS
+mcfadden_drugs <- blr_rsq_mcfadden_adj(drug_lm1)
+adjusted_mcfadden_drugs <- blr_rsq_mcfadden(drug_lm1)
+```
+
+
+```{r}
+stargazer(extortion_lm1, rob_lm1, smug_lm1, kid_lm1, drug_lm1, 
+          type = "text", 
+          se = list(clustered_ex, clustered_rob, clustered_smug, clustered_kid, clustered_drug), 
+          title = "Table 1: ROSE Resampled Ridge Regressions of Terrorist Crimes on Organization Level Factors", 
+          dep.var.labels = c("Extortion", "Robbery", "Smuggling", "Kidnapping", "Drug Trade"), 
+          omit.stat = c("LL", "AIC", "F"), 
+          covariate.labels = c("Terr. Control", "Org. Age", "State Spons.", "Int. Crime Org.", "Org. Size",
+                               "Pure Religious", "Pure Secular", "Hybrid-Secular", "Hybrid-Religious", "Year"), 
+          add.lines = list(
+            c("AIC", round(AIC(extortion_lm1), 2), round(AIC(rob_lm1), 2), round(AIC(smug_lm1), 2), 
+              round(AIC(kid_lm1), 2), round(AIC(drug_lm1), 2)),
+            c("McFadden's R-Square", round(mcfadden_extortion, 4), round(mcfadden_robbery, 4), round(mcfadden_smuggling, 4), 
+              round(mcfadden_kidnap, 4), round(mcfadden_drugs, 4)), 
+            c("Adjusted McFadden's", round(adjusted_mcfadden_extortion, 4), round(adjusted_mcfadden_robbery, 4), round(adjusted_mcfadden_smug, 4),
+            	round(adjusted_mcfadden_kidnap, 4), round(adjusted_mcfadden_drugs, 4)), 
+            c("BIC", round(BIC(extortion_lm1), 2), round(BIC(rob_lm1), 2), round(BIC(smug_lm1), 2), round(BIC(kid_lm1), 2), 
+              	round(BIC(drug_lm1), 2))
+          ), out = "sensitivity.1.1.html"
+)
+
+```
+
+
+```{r}
+library(car)
+vif_ex <- vif(extortion_lm1)
+vif_rob <- vif(rob_lm1)
+vif_smugg <- vif(smug_lm1)
+vif_kidnap <- vif(kid_lm1)
+vif_drugs <- vif(drug_lm1)
+
+vif_table <- cbind(vif_ex, vif_rob, vif_smugg, vif_kidnap, vif_drugs)
+
+vif_names <- c(combined_terrctrl = "Territorial Control",
+							 combined_duration = "Org. Age",
+										combined_state_sponsor = "State Spons.",
+										crim_degr_py = "Crime Interactions", 
+										combined_size = "Org. Size", 
+										pure_religious = "Religious", 
+										pure_secular = "Pure Secular", 
+										secular_hybrid = "Hybrid-Secular", 
+										hybrid_religious = "Hybrid-Religious", 
+										Year = "Year")
+vif_cols <- c(vif_ex = "Extortion VIF", vif_rob = "Robbery VIF", vif_smugg = "Smuggling VIF", vif_kidnap = "Kidnapping VIF", vif_drugs = "Drug Trade VIF")
+
+rownames(vif_table) <- vif_names
+colnames(vif_table) <- vif_cols
+
+table2 <- kable(vif_table, caption = "Table 2: ROSE Resampled Model VIF Scores") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = T, position = "center")
+
+save_kable(table2, "sensitivity.1.2.html")
+```
+
+
+```{r}
+# Calculate deviance residuals for each model
+residuals_extortion1 <- residuals(extortion_lm1, type = "deviance")
+residuals_robbery1 <- residuals(rob_lm1, type = "deviance")
+residuals_smuggling1 <- residuals(smug_lm1, type = "deviance")
+residuals_kidnap1 <- residuals(kid_lm1, type = "deviance")
+residuals_drugs1 <- residuals(drug_lm1, type = "deviance")
+
+
+library(ggplot2)
+library(gridExtra)
+# Create data frames for plotting
+extortion_df1 <- data.frame(Fitted = fitted(extortion_lm1), Residuals = residuals_extortion1)
+robbery_df1 <- data.frame(Fitted = fitted(rob_lm1), Residuals = residuals_robbery1)
+smuggling_df1 <- data.frame(Fitted = fitted(smug_lm1), Residuals = residuals_smuggling1)
+kidnap_df1 <- data.frame(Fitted = fitted(kid_lm1), Residuals = residuals_kidnap1)
+drugs_df1 <- data.frame(Fitted = fitted(drug_lm1), Residuals = residuals_drugs1)
+
+# Plot for Extortion model
+plot1 <- ggplot(extortion_df1, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  ggtitle("Residuals vs Fitted for Extortion Model")
+
+# Plot for Robbery model
+plot2 <- ggplot(robbery_df1, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  ggtitle("Residuals vs Fitted for Robbery Model")
+
+# Plot for Smuggling model
+plot3 <- ggplot(smuggling_df1, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  ggtitle("Residuals vs Fitted for Smuggling Model")
+
+# Plot for Kidnap model
+plot4 <- ggplot(kidnap_df1, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  ggtitle("Residuals vs Fitted for Kidnap Model")
+
+# Plot for Drugs model
+plot5 <- ggplot(drugs_df1, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  ggtitle("Residuals vs Fitted for Drugs Model")
+
+
+grid <- arrangeGrob(plot1, plot2, plot3, plot4, plot5, 
+                    nrow = 3, ncol = 2, 
+                    top = textGrob("Figure 1:ROSE Resampled Regressions: Residuals vs. Fitted Plots", 
+                                   gp = gpar(fontsize = 20, fontface = "bold")))
+
+ggsave("sensitivity.1.3.pdf", grid, width = 10, height = 10)
+```
+
+
+
+
+
+
+
+
+

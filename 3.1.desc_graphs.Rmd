@@ -1,0 +1,174 @@
+---
+title: "Descriptives"
+output: html_document
+date: "2024-07-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(leaflet)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+```
+
+## Preparing data 
+```{r}
+data <- read.csv("/Users/valentinalaugeri/Documents/LSE/Diss/dissertation/data/imputed_cleaned_data.csv")
+data <- data %>% 
+	mutate(group = factor(group))
+
+data <- data %>%
+  mutate(fdextort = factor(fdextort, levels = c(0, 1))) %>% 
+	mutate(fdsmuggl = factor(fdsmuggl, levels = c(0, 1))) %>% 
+	mutate(fdrob = factor(fdrob, levels = c(0, 1))) %>% 
+	mutate(mul_bases = factor(mul_bases, levels = c(0, 1))) %>% 
+	mutate(crim_degr_py = as.numeric(crim_degr_py)) %>% 
+	mutate(endstr = factor(endstr, levels = c(0, 1, 2, 3, 4, 5))) %>% 
+	mutate(end = factor(end, levels = c(0, 1))) %>% 
+	mutate(ethn = factor(ethn, levels = c(0, 1))) %>% 
+	mutate(EAP = factor(EAP, levels = c(0, 1))) %>% 
+	mutate(ECA = factor(ECA, levels = c(0, 1))) %>% 
+	mutate(LAC = factor(LAC, levels = c(0, 1))) %>% 
+	mutate(MENA = factor(MENA, levels = c(0, 1))) %>% 
+	mutate(North_America = factor(North_America, levels = c(0, 1))) %>% 
+	mutate(SAS = factor(SAS, levels = c(0, 1))) %>% 
+	mutate(SSA = factor(SSA, levels = c(0, 1))) %>% 
+	mutate(nat = factor(nat, levels = c(0, 1))) %>% 
+	mutate(right = factor(right, levels = c(0, 1))) %>% 
+	mutate(ercsr = factor(ercsr, levels = c(0, 1))) %>% 
+	mutate(pch = factor(pch, levels = c(0, 1))) %>% 
+	mutate(sq = factor(sq, levels = c(0, 1))) %>% 
+	mutate(tch = factor(tch, levels = c(0, 1))) %>% 
+	mutate(public_service = factor(public_service, levels = c(0, 1))) %>% 
+	mutate(fate_leader = factor(fate_leader, levels = c(0, 1, 2))) %>% 
+	mutate(soc_service = factor(soc_service, levels = c(0, 1))) %>% 
+	mutate(combined_size = factor(combined_size, levels = c("1", "2", "3", "4", "5"))) %>% 
+  mutate(combined_reli = factor(combined_reli, levels = c(0, 1))) %>% 
+  mutate(combined_left = factor(combined_left, levels = c(0, 1))) %>% 
+  mutate(combined_hierarch = factor(combined_hierarch, levels = c(0, 1))) %>% 
+  mutate(combined_drug_trafficking = factor(combined_drug_trafficking, levels = c(0, 1))) %>%
+  mutate(combined_kidnap = factor(combined_kidnap, levels = c(0, 1))) %>%
+  mutate(combined_state_sponsor = factor(combined_state_sponsor, levels = c(0, 1))) %>%
+  mutate(combined_terrctrl = factor(combined_terrctrl, levels = c(0, 1)))
+```
+
+```{r}
+# separating the data by unique group
+filtered_data <- data %>%
+  distinct(group, .keep_all = TRUE)
+```
+
+```{r count of organizations per region}
+# Select and reshape only the regional binary variables to long format
+regional_vars <- c("EAP", "MENA", "North_America", "SSA", "ECA", "LAC", "SAS")
+data_long <- filtered_data %>%
+  select(all_of(regional_vars)) %>%
+  pivot_longer(cols = everything(), names_to = "region", values_to = "value") %>%
+  filter(value == 1)
+
+data_long$region <- factor(data_long$region, levels = regional_vars,
+                           labels = c("EAP" = "East Asia & Pacific",
+                                      "MENA" = "Middle East & North Africa",
+                                      "North_america" = "North America",
+                                      "SSA" = "Sub-Saharan Africa",
+                                      "ECA" = "Europe & Central Asia",
+                                      "LAC" = "Latin America & Caribbean",
+                                      "SAS" = "South Asia"))
+
+# Plotting the data
+des1 <- ggplot(data_long, aes(x = region)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Figure 2: Count of Organizations in Each Region",
+       x = "Region", y = "Count of Organizations") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+#ggsave("descriptive1.png", des1, width = 15, height = 10, dpi = 300)
+```
+
+```{r}
+# Create a binary variable indicating if crim_degr_py is greater than 0
+data <- data %>%
+  mutate(crim_degr_py_binary = ifelse(crim_degr_py > 0, "No Interaction", "Interaction"))
+# Reshape the data to have regions in a single column
+data_long <- data %>%
+  pivot_longer(cols = c("EAP", "MENA", "North_America", "SSA", "ECA", "LAC", "SAS"),
+               names_to = "Region",
+               values_to = "value") %>%
+  filter(value == 1)  # Keep only rows where the region is present
+
+data_long$Region <- factor(data_long$Region, levels = regional_vars,
+                           labels = c("EAP" = "East Asia & Pacific",
+                                      "MENA" = "Middle East & North Africa",
+                                      "North_america" = "North America",
+                                      "SSA" = "Sub-Saharan Africa",
+                                      "ECA" = "Europe & Central Asia",
+                                      "LAC" = "Latin America & Caribbean",
+                                      "SAS" = "South Asia"))
+ data_long <- data_long %>%
+   distinct(group, .keep_all = TRUE)
+
+# Summarize the data to count the number of organizations in each region for each crim_degr_py_binary level
+data_summary <- data_long %>%
+  group_by(Region, crim_degr_py_binary) %>%
+  summarise(Count = n(), .groups = 'drop')
+# Create the stacked bar graph
+des2 <- ggplot(data_summary, aes(x = Region, y = Count, fill = crim_degr_py_binary)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Interaction" = "indianred3", "No Interaction" = "steelblue"),
+                    name = "Crime Interaction") +
+  theme_minimal() +
+  labs(title = "Figure 3: Count of Organizations by Region and Crime Interaction",
+       x = "Region",
+       y = "Count of Organizations") +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 11),
+        legend.title = element_text(size = 11),
+        plot.title = element_text(size = 12)) +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+#ggsave("descriptive.2.png", des2, width = 15, height = 10, dpi = 300)
+```
+
+```{r religious organizations vs non-religious}
+filtered_data$religious <- (filtered_data$combined_reli == 1)
+filtered_data$secular <- (filtered_data$combined_left == 1 | filtered_data$nat == 1 | filtered_data$right == 1 | filtered_data$ercsr ==1)
+```
+
+```{r ideologies distribution (not included in final project)}
+data_summary <- filtered_data %>%
+  summarise(
+    Religious = sum(religious == 1, na.rm = TRUE),
+    Secular = sum(secular == 1, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Type", values_to = "Count")
+
+# Plot the bar plot
+des3 <- ggplot(data_summary, aes(x = Type, y = Count, fill = Type)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Religious" = "steelblue", "Secular" = "steelblue")) +
+  theme_minimal() +
+  labs(title = "Fiure 4: Count of Religious and Secular Organizations",
+       x = "Ideological Type",
+       y = "Count of Organizations") +
+  theme(legend.position = "none")
+```
+
+```{r grid saving (included in final project)}
+grid <- grid.arrange(des1, des2, ncol = 2)
+ggsave("descriptive.grid.1.png", grid, width = 15, height = 10, dpi = 300)
+```
+
+
+
+
+
+
+

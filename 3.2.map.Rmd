@@ -1,0 +1,289 @@
+---
+title: "Mapping Diss"
+output: html_document
+date: "2024-06-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+library(tidyverse)
+library(leaflet)
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+```
+
+```{r loading data}
+data <- read.csv("cleaned_data1.csv")
+data <- data %>% 
+	mutate(group = factor(group))
+```
+
+```{r formatting data}
+data <- data %>%
+  mutate(fdextort = factor(fdextort, levels = c(0, 1))) %>% 
+	mutate(fdsmuggl = factor(fdsmuggl, levels = c(0, 1))) %>% 
+	mutate(fdrob = factor(fdrob, levels = c(0, 1))) %>% 
+	mutate(mul_bases = factor(mul_bases, levels = c(0, 1))) %>% 
+	mutate(crim_degr_py = as.numeric(crim_degr_py)) %>% 
+	mutate(endstr = factor(endstr, levels = c(0, 1, 2, 3, 4, 5))) %>% 
+	mutate(end = factor(end, levels = c(0, 1))) %>% 
+	mutate(ethn = factor(ethn, levels = c(0, 1))) %>% 
+	mutate(EAP = factor(EAP, levels = c(0, 1))) %>% 
+	mutate(ECA = factor(ECA, levels = c(0, 1))) %>% 
+	mutate(LAC = factor(LAC, levels = c(0, 1))) %>% 
+	mutate(MENA = factor(MENA, levels = c(0, 1))) %>% 
+	mutate(North_America = factor(North_America, levels = c(0, 1))) %>% 
+	mutate(SAS = factor(SAS, levels = c(0, 1))) %>% 
+	mutate(SSA = factor(SSA, levels = c(0, 1))) %>% 
+	mutate(nat = factor(nat, levels = c(0, 1))) %>% 
+	mutate(right = factor(right, levels = c(0, 1))) %>% 
+	mutate(ercsr = factor(ercsr, levels = c(0, 1))) %>% 
+	mutate(pch = factor(pch, levels = c(0, 1))) %>% 
+	mutate(sq = factor(sq, levels = c(0, 1))) %>% 
+	mutate(tch = factor(tch, levels = c(0, 1))) %>% 
+	mutate(public_service = factor(public_service, levels = c(0, 1))) %>% 
+	mutate(fate_leader = factor(fate_leader, levels = c(0, 1, 2))) %>% 
+	mutate(soc_service = factor(soc_service, levels = c(0, 1))) %>% 
+	mutate(combined_size = factor(combined_size, levels = c("1", "2", "3", "4", "5"))) %>% 
+  mutate(combined_reli = factor(combined_reli, levels = c(0, 1))) %>% 
+  mutate(combined_left = factor(combined_left, levels = c(0, 1))) %>% 
+  mutate(combined_hierarch = factor(combined_hierarch, levels = c(0, 1))) %>% 
+  mutate(combined_drug_trafficking = factor(combined_drug_trafficking, levels = c(0, 1))) %>%
+  mutate(combined_kidnap = factor(combined_kidnap, levels = c(0, 1))) %>%
+  mutate(combined_state_sponsor = factor(combined_state_sponsor, levels = c(0, 1))) %>%
+  mutate(combined_terrctrl = factor(combined_terrctrl, levels = c(0, 1)))
+```
+
+```{r making a new base variable}
+# Create a new variable 'single_base' by extracting the first element
+data$single_base <- sapply(strsplit(data$combined_base, ","), `[`, 1)
+#summary(data$combined_base)
+data <- data %>% 
+	mutate(single_base = ifelse(group == "Greek Bulgarian Armenian Front", "Greece", single_base)) %>% 
+	mutate(single_base = ifelse(group == "Orly Organization", "Armenia", single_base)) %>% 
+	mutate(single_base = ifelse(group == "New Armenian Resistance", "Armenia", single_base)) %>% 
+	mutate(single_base= ifelse(single_base == "U.S.", "United States", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "UK", "United Kingdom", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "Democratic Republic of the Congo", "Dem. Rep. Congo", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "Northern Ireland", "Ireland", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "Palestinian Territories", "Palestine", single_base)) %>%
+	mutate(single_base = ifelse(single_base == "West Bank/Gaza", "Palestine", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "Dominican Republic", "Dominican Rep.", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "Cote d'Ivoire", "Côte d'Ivoire", single_base)) %>% 
+	mutate(single_base = ifelse(single_base == "Serbie and Montenegro", "Serbia", single_base)) %>%
+	mutate(single_base = ifelse(single_base == "Central African Republic", "Central African Rep.", single_base)) %>%
+	mutate(single_base = ifelse(single_base == "Russian Federation", "Russia", single_base)) %>%
+	mutate(single_base = ifelse(single_base == "South Sudan", "S. Sudan", single_base)) %>%
+	mutate(single_base = ifelse(single_base == "DR. Congo", "Dem. Rep. Congo", single_base)) %>%
+	mutate(single_base = ifelse(single_base == "Austalia", "Australia", single_base)) 
+
+# # Create a mapping for mismatched country names
+# country_name_mapping <- c("Palestinian Territories" = "Palestine", "Northern Ireland" = "Ireland", "Democratic Republic of the Congo" = "Dem. Rep. Congo", "U.S" = "United States of America", "UK" = "United Kingdom", "DR. Congo" = "Dem. Rep. Congo")
+# 
+# # Apply the mapping to your data
+# data$single_base <- recode(data$single_base, !!!country_name_mapping)
+```
+
+## Plotting graph 
+```{r warning = FALSE, message=FALSE}
+# Load the shapefile (replace with the actual path to your downloaded shapefile)
+countries <- st_read("/dissertation/countries/ne_10m_admin_0_countries.shp")
+
+# Make geometries valid
+countries <- st_make_valid(countries)
+
+# Calculate centroids
+country_centroids <- countries %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(longitude = X, latitude = Y)
+
+# Combine centroids with country names
+country_coords <- countries %>%
+  select(NAME) %>%
+  bind_cols(country_centroids) %>%
+  rename(country = NAME)
+
+# Join the dataframes to add latitude and longitude columns
+df_with_coords <- data %>%
+  full_join(country_coords, by = c("single_base" = "country"))
+
+df_with_coords$group <- trimws(df_with_coords$group)
+
+# Remove rows with NA values in the key columns just in case
+df_with_coords <- df_with_coords %>%
+  filter(!is.na(longitude) & !is.na(latitude) & !is.na(crim_degr_py))
+
+# Count the number of groups in each country
+group_counts <- df_with_coords %>%
+  group_by(single_base) %>%
+  summarise(group_count = n())
+
+# Merge the count data with the spatial data for the countries
+countries <- countries %>%
+  left_join(group_counts, by = c("NAME" = "single_base"))
+
+# Replace NA values in the group_count column with 0
+countries$group_count[is.na(countries$group_count)] <- 0
+
+# Function to generate random points within a country polygon
+generate_random_points <- function(country_name, n_points) {
+  country_polygon <- world %>% filter(name == country_name)
+  if (nrow(country_polygon) == 0) return(NULL)
+  
+  random_points <- st_sample(country_polygon, size = n_points, type = "random")
+  random_points_df <- st_coordinates(random_points) %>% as.data.frame()
+  names(random_points_df) <- c("jitter_lng", "jitter_lat")
+  return(random_points_df)
+}
+
+# Add jittered coordinates to df_greater_than_1 based on country boundaries
+df_greater_than_1 <- df_with_coords %>%
+  filter(crim_degr_py >= 1) %>%
+  group_by(single_base) %>%
+  mutate(id = row_number()) %>%
+  do({
+    country_name <- unique(.$single_base)
+    n_points <- nrow(.)
+    random_points <- generate_random_points(country_name, n_points)
+    if (!is.null(random_points)) {
+      bind_cols(., random_points)
+    } else {
+      mutate(., jitter_lng = longitude + runif(n(), min = -1, max = 1),
+             jitter_lat = latitude + runif(n(), min = -1, max = 1))
+    }
+  }) %>%
+  ungroup() %>%
+  select(-id)
+
+# Sample one point per group for df_less_than_or_equal_to_1
+df_less_than_or_equal_to_1 <- df_with_coords %>%
+  filter(crim_degr_py < 1) %>%
+  group_by(group) %>%
+  sample_n(1) %>%
+  ungroup()
+
+df_greater_than_1 <- df_greater_than_1 %>%
+  group_by(group) %>%
+  sample_n(1) %>%
+  ungroup()
+
+
+map <- ggplot(data = countries) +
+  geom_sf(aes(fill = group_count), color = "gray", size = 0.1) + 
+  scale_fill_gradient(low = "lightyellow", high = "darkorange", na.value = "lightyellow", name = "Number of Groups") +
+  geom_point(data = df_less_than_or_equal_to_1, aes(x = longitude, y = latitude, color = "No Interaction"), size = 1.5) +
+  geom_point(data = df_greater_than_1, aes(x = jitter_lng, y = jitter_lat, color = "Interaction"), size = 1.5) +
+  scale_color_manual(values = c("No Interaction" = "hotpink", "Interaction" = "seagreen3"),
+                     name = "Crime Interaction") +
+  theme_minimal() +
+  labs(title = "Figure 1: Global Representation of Terrorist Organizations",
+       x = NULL,
+       y = NULL) +
+  theme(legend.position = "bottom", 
+  			legend.text = element_text(size = 11), 
+  			legend.title = element_text(size = 11), 
+  			legend.box.spacing = unit(0.5, "cm"), 
+  			legend.key.size = unit(1,"lines"), 
+  			plot.title = element_text(size = 16))+ 
+	guides(color = guide_legend(direction = "vertical"), 
+				 fill = guide_colorbar(title.position = "top"))
+
+ggsave("map1.png", map, width = 20, height = 15, dpi = 300)
+```
+
+
+```{r}
+# Load the world boundaries
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Combine the filtered data frames
+combined_data <- bind_rows(df_greater_than_1, df_less_than_or_equal_to_1)
+
+# Count the number of dots per country
+country_dot_counts <- combined_data %>%
+  group_by(single_base) %>%
+  summarise(dot_count = n()) %>%
+  ungroup()
+
+# Step 3: Merge the dot counts with the world spatial object
+world_dot_counts <- world %>%
+  left_join(country_dot_counts, by = c("name" = "single_base"))
+
+# Replace NA counts with 0
+world_dot_counts$dot_count[is.na(world_dot_counts$dot_count)] <- 0
+
+# Set France's dot count to the minimum value
+min_dot_count <- min(world_dot_counts$dot_count, na.rm = TRUE)
+world_dot_counts <- world_dot_counts %>%
+  mutate(dot_count = ifelse(name == "France", min_dot_count, dot_count))
+
+# Step 4: Create a color palette for the gradient with adjusted domain
+pal <- colorNumeric(
+  palette = "YlOrBr",
+  domain = world_dot_counts$dot_count,
+  na.color = "transparent"
+)
+
+# Create the leaflet map
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = world_dot_counts,
+    fillColor = ~pal(dot_count),
+    weight = 1,
+    opacity = 1,
+    color = "white",
+    fillOpacity = 0.6,
+    label = ~paste(name, "<br>Groups:", dot_count),
+    highlight = highlightOptions(
+      weight = 3,
+      color = "#666",
+      fillOpacity = 0.7,
+      bringToFront = TRUE
+    ),
+    options = pathOptions(clickable = FALSE)  # This line makes polygons non-intercepting clicks
+  ) %>%
+  addCircleMarkers(
+    data = df_less_than_or_equal_to_1,
+    lng = ~longitude, lat = ~latitude,
+    color = "hotpink", radius = 2,
+    popup = ~paste("Group:", group, "<br>",
+                   "Country:", single_base, "<br>",
+                   "Crime interaction count (/year):", crim_degr_py)
+  ) %>%
+  addCircleMarkers(
+    data = df_greater_than_1,
+    lng = ~jitter_lng, lat = ~jitter_lat,
+    color = "blue", radius = 2,
+    popup = ~paste("Group:", group, "<br>",
+                   "Country:", single_base, "<br>",
+                   "Crime interaction count (/year):", crim_degr_py)
+  ) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = 0, lat = 0, zoom = 2) %>%
+  addLegend(
+    "bottomright",
+    colors = c("hotpink", "blue"),
+    labels = c("No organized crime interaction", "Organized crime interaction"),
+    title = "Legend",
+    opacity = 0.7
+  ) %>%
+  addLegend(
+    "bottomleft",
+    pal = pal,
+    values = world_dot_counts$dot_count,
+    title = "Number of Groups",
+    opacity = 0.7
+  )
+
+```
+
